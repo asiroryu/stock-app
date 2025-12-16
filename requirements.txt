@@ -2,7 +2,7 @@ streamlit
 yfinance
 pandas
 numpy
-talib
 plotly
 scikit-learn
 xgboost
+# talib 已移除，將改由 Conda 安裝
