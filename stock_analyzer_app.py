@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split
 from plotly.subplots import make_subplots 
 
 # --- 1. Streamlit 頁面設定 ---
-st.set_page_config(layout="wide", page_title="台灣個股智能分析系統 (V4.7)")
+st.set_page_config(layout="wide", page_title="台灣個股智能分析系統 (V4.8)")
 
 # --- 2. 數據獲取與緩存 (自動連網抓取) ---
 
@@ -50,15 +50,19 @@ def fetch_tse_chip_data(stock_id):
             
         data = target_stock.iloc[0]
         def clean_volume(s):
-            return int(str(s).replace(',', '')) / 1000 
+            # 確保欄位是字串，並移除千分位逗號後轉為千張
+            return int(str(data['三大法人買賣超股數']).replace(',', '')) / 1000 
         
-        return {
+        # 為了避免籌碼資料的欄位名稱太長，統一用字典回傳
+        chip_data_result = {
             "日期": query_date,
             "股票名稱": data['證券名稱'],
-            "三大法人合計 (千張)": clean_volume(data['三大法人買賣超股數']),
-            "外資買賣超 (千張)": clean_volume(data['外資自營商買賣超股數']),
-            "投信買賣超 (千張)": clean_volume(data['投信買賣超股數']),
+            "三大法人合計 (千張)": int(str(data['三大法人買賣超股數']).replace(',', '')) / 1000,
+            "外資買賣超 (千張)": int(str(data['外資自營商買賣超股數']).replace(',', '')) / 1000,
+            "投信買賣超 (千張)": int(str(data['投信買賣超股數']).replace(',', '')) / 1000,
         }
+        return chip_data_result
+
     except Exception as e:
         return {"error": f"💀 籌碼數據獲取錯誤: {e}"}
 
@@ -80,12 +84,12 @@ def fetch_fundamentals(stock_id):
         return {"stock_name": f'股票代號 {stock_id}'}
 
 
-# --- 3. 分析與模型訓練邏輯 (V4.7 穩定性核心) ---
+# --- 3. 分析與模型訓練邏輯 (V4.8 穩定性核心) ---
 
 def calculate_indicators(data):
     """計算所有技術指標 (使用 TA-Lib)，V4.4 加入 TA-Lib 異常捕獲"""
     
-    # 第一次強制清除 NaN 值
+    # 第一次強制清除 NaN 值 (雖然 V4.7 在 main 已經清理過一次)
     data = data.dropna()
     
     # 數據完整性檢查
@@ -105,7 +109,6 @@ def calculate_indicators(data):
              return pd.DataFrame()
 
     except ValueError:
-        # 這個 except 在 V4.7 應該不會觸發，因為強制轉換已在 main() 中完成
         st.error("❌ 數據型態轉換錯誤：股價數據中可能包含非數值字串或無效值。")
         return pd.DataFrame()
 
@@ -156,6 +159,15 @@ def prepare_prediction_features(data, chip_data, fundamentals):
     feature_cols = [col for col in df.columns if col.startswith('Feature_')]
     df = df.dropna()
     
+    # 檢查歷史數據是否足以訓練模型
+    if df.shape[0] == 0:
+        # 返回空的特徵集，會在 train_and_predict 中被捕獲
+        return {
+            "Feature_Columns": feature_cols,
+            "Latest_Features_DF": pd.DataFrame(),
+            "Historical_Data_DF": pd.DataFrame(),
+        }
+
     # 最新一日的特徵 (用於實時預測)
     latest_features = df[feature_cols].iloc[-1].to_frame().T.reset_index(drop=True)
     
@@ -196,6 +208,10 @@ def train_and_predict(data_bundle, stock_id):
         X = historical_df[feature_cols]
         Y = historical_df['Price_Change_Label']
         
+        # 檢查 X, Y 是否有 NaN 或 Inf
+        if X.isnull().values.any() or Y.isnull().values.any() or np.isinf(X.values).any():
+             return {"predicted_change_pct": None, "error": "❌ 機器學習數據清洗失敗：特徵中含有 NaN 或 Inf 值，無法訓練模型。"}
+
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         X_train, X_test, Y_train, Y_test = train_test_split(X_scaled, Y, test_size=0.2, shuffle=False)
@@ -210,6 +226,11 @@ def train_and_predict(data_bundle, stock_id):
 
     # 進行預測
     X_latest = latest_features_df[feature_cols]
+    
+    # 預測前再次檢查
+    if X_latest.isnull().values.any() or np.isinf(X_latest.values).any():
+        return {"predicted_change_pct": None, "error": "❌ 機器學習數據清洗失敗：最新特徵中含有 NaN 或 Inf 值，無法進行預測。"}
+
     X_latest_scaled = scaler.transform(X_latest)
     predicted_change_pct = model.predict(X_latest_scaled)[0]
     
@@ -232,7 +253,7 @@ def plot_candlestick(data):
                         go.Scatter(x=data.index, y=data['BB_Mid'], line=dict(color='gray', width=1), name='中軌'),
                         go.Scatter(x=data.index, y=data['BB_Lower'], line=dict(color='orange', width=1), name='下軌')])
     
-    fig.update_layout(title='股價 K 線圖與布林通道', xaxis_rangeslider_visible=False, height=500)
+    fig.update_layout(title='股價 K 線圖與布林通道', xaxis_rangeslider_visible=False, height=500, margin=dict(l=20, r=20, t=40, b=20))
     return fig
 
 def plot_macd_kd(data):
@@ -258,11 +279,11 @@ def plot_macd_kd(data):
     fig.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
     fig.update_yaxes(title_text="KD指標 (0-100)", range=[0, 100], row=2, col=1)
     
-    fig.update_layout(title='MACD 與 KD 指標分析', height=500)
+    fig.update_layout(title='MACD 與 KD 指標分析', height=500, margin=dict(l=20, r=20, t=40, b=20))
     return fig
 
 
-# --- 5. 輸出報告與建議 ---
+# --- 5. 輸出報告與建議 (V4.8 修正) ---
 
 def generate_report(data, chip_data, fundamentals, buy_price, stop_loss_pct, take_profit_pct, prediction_result):
     """整合輸出所有分析結果"""
@@ -272,7 +293,7 @@ def generate_report(data, chip_data, fundamentals, buy_price, stop_loss_pct, tak
     st.header(f"💰 個股綜合分析報告 - {stock_name} ({st.session_state['current_stock']})")
 
     # A. 預測結果
-    st.subheader("🔮 IV. 次日漲跌預測 (機器學習 V4.7)")
+    st.subheader("🔮 IV. 次日漲跌預測 (機器學習 V4.8)")
     
     pct = prediction_result['predicted_change_pct']
     if pct is not None:
@@ -290,24 +311,25 @@ def generate_report(data, chip_data, fundamentals, buy_price, stop_loss_pct, tak
 
     st.subheader("📊 II. 技術面指標與圖表")
     
-    col_kline, col_macd_kd = st.columns(2)
-    
     # 檢查技術指標是否成功計算 
     indicators_available = 'BB_Lower' in data.columns
     
-    with col_kline:
-        if indicators_available:
-            fig_candle = plot_candlestick(data)
+    if indicators_available:
+        fig_candle = plot_candlestick(data)
+        fig_macd_kd = plot_macd_kd(data)
+        
+        # V4.8 修正: 隔離 Plotly 繪製，避免 'removeChild' 錯誤
+        col_kline, col_macd_kd = st.columns(2)
+        
+        with col_kline:
             st.plotly_chart(fig_candle, use_container_width=True)
-        else:
-            st.warning("⚠️ 數據不足或 TA-Lib 錯誤，無法繪製完整的 K 線和布林通道圖。")
 
-    with col_macd_kd:
-        if indicators_available:
-            fig_macd_kd = plot_macd_kd(data)
+        with col_macd_kd:
             st.plotly_chart(fig_macd_kd, use_container_width=True)
-        else:
-            st.warning("⚠️ 數據不足或 TA-Lib 錯誤，無法繪製 MACD 與 KD 指標圖。")
+            
+    else:
+        st.warning("⚠️ 數據不足或 TA-Lib 錯誤，無法繪製完整的 K 線和指標圖。")
+
 
     # B. 停損停利建議
     st.subheader("🛡️ V. 股票停損停利建議")
@@ -378,7 +400,7 @@ def generate_report(data, chip_data, fundamentals, buy_price, stop_loss_pct, tak
 # --- 6. 介面主邏輯 ---
 
 def main():
-    st.title("📈 台灣個股智能分析系統 V4.7")
+    st.title("📈 台灣個股智能分析系統 V4.8")
     st.markdown("---")
     st.sidebar.header("設置與查詢")
 
